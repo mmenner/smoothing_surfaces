@@ -3,7 +3,7 @@ from setuptools import setup
 setup(
     # Needed to silence warnings (and to be a worthwhile package)
     name='smurf',
-    url='https://github.com/...',
+    url='https://github.com/mmenner',
     author='Marco Menner',
     author_email='marco.menner88@gmail.com',
     # Needed to actually package something
