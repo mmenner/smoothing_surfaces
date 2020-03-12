@@ -5,34 +5,57 @@ from gurobipy import Model, QuadExpr, GRB, quicksum
 from numpy import empty
 from cvxopt import matrix
 from cvxopt import solvers as cvxsolvers
-import keras
+from scipy import stats
+import sys 
+
 tt = np.matrix.transpose
 cc = np.concatenate
 
-
-
 class QPSmoother:
     '''QPSmoother class. 
-
-    Input:
+    init:
           x1:      full grid dimension1  
           x1_obs:  features dimension1 (must intersect with full grid x1)
           x2:      full grid dimension2
           x2_obs:  features dumension2 (must intersect with full grid x2)
           y_obs:   observed label
           l_diff:  smoothing parameter
-          hessian: hessian in the QP problem. Calculated if not provided
+          hessian: hessian in the QP problem. Computed if not provided
+    get_qp:
+        sets up matrices for the qp solver and saves them in QPSmoother.qp
+    solve: 
+        solve qp problem using a given solver
     '''
     def __init__(self, x1=None, x1_obs=None, x2=None, x2_obs=None, y_obs=None, l_diff=1, hessian=None):
+        
+        if min(np.diff(x1))<0 or len(np.unique(x1)) < len(x1):
+            print('Error: x1 must be strictly increasing')
+            sys.exit()   
         self.hessian = hessian
         if x2_obs is not None:
             self.dimension = 2
+            if min(np.diff(x2))<0 or len(np.unique(x2)) < len(x2):
+                print('Error: x2 must be strictly increasing')
+                sys.exit()    
+            if len(np.unique(list(zip(x1_obs,x2_obs)))) < len(x2_obs) or len(x2_obs) != len(x2_obs):
+                print('Error: x1_obs, x2_obs must consits of unique pairs and have both the same length as y_obs')
+                sys.exit() 
             # compute 2d - hessian and store
             if self.hessian is None:
                 self.hessian = hessian2d(x1, x2, l_diff)
             self.l_diff = l_diff
         else:
-            self.dimension = 1
+            self.dimension = 1              
+            if len(np.unique(x1_obs)) < len(x1_obs):
+                print('Error: values of x1_obs must be unique')
+                sys.exit()
+            if len(x1_obs) != len(y_obs):
+                print('Error: x1_obs must have the same length as y_obs')
+                sys.exit()                
+            #sort values (x1_obs must be increasing)
+            idx = np.argsort(x1_obs) 
+            x1_obs = x1_obs[idx]
+            y_obs = y_obs[idx]
             if self.hessian is None:
                 self.hessian = hessian1d(len(x1), 1, -2, 1)
         self.x1 = x1
@@ -41,25 +64,68 @@ class QPSmoother:
         self.x2_obs = x2_obs
         self.y_obs = y_obs
         self.qp = None
-        self.y = None
-
-    def solve(self, qp_method, solver, l_fit=0, lb=[-np.infty], ub=[np.infty]):
+        self.y = None       
+        
+    def get_qp(self, qp_method, solver, l_fit=0, lb=-np.infty, ub=np.infty):
+        
+        if qp_method == 'smooth':
+            if l_fit <= 0 or l_fit >=1:
+                print('l_fit must lie in the interval (0,1). l_fit is set to nearest boundary')
+            l_fit = min(max(1e-10,l_fit),1-1e-10)
+            l_fit = (stats.norm.ppf(l_fit)+2.5)/5
+            l_fit = max(l_fit,0)**4
+            if self.dimension == 1:   
+                l_fit = l_fit*len(self.x1)**2/len(self.y_obs)/((self.x1[-1]-self.x1[0]))
+            else:
+                l_fit = l_fit*(len(self.x1)*len(self.x2))**2/len(self.y_obs)/((self.x1[-1]-self.x1[0])*(self.x2[-1]-self.x2[0]))        
         self.qp = QPComponents(self, qp_method, l_fit)
         self.qp.method = qp_method
-        #transform ub and lb into vectors
-        if (type(lb) is float) or (type(lb) is int):
-             lb = [lb]
-        if (type(ub) is float) or (type(ub) is int):
-             ub = [ub]            
-        self.qp.ub = np.ones(int(self.qp.n/len(np.array(ub))))*np.array(ub)  
-        self.qp.lb = np.ones(int(self.qp.n/len(np.array(lb))))*np.array(lb)
+        self.qp.l_fit_init = l_fit
+        if qp_method == 'smooth':
+            l_fit = (stats.norm.ppf(min(max(1e-10,l_fit),1-1e-10))+2.5)/5
+            l_fit = max(l_fit,0)**4
+            if self.dimension == 1:
+                l_fit = l_fit*len(self.x1)**2/len(self.y_obs)/((self.x1[-1]-self.x1[0]))
+            else:
+                l_fit = l_fit*(len(self.x1)*len(self.x2))**2/len(self.y_obs)/((self.x1[-1]-self.x1[0])*(self.x2[-1]-self.x2[0]))
         self.qp.l_fit = l_fit
-        qp_solver = QPSolver(solver)
-        qp_solver.optimize(self.qp)
+        self.qp.ub = ub
+        self.qp.lb = lb
+
+              
+    def solve(self, solver, try_closed_form = False):
+        if solver not in ['gurobi', 'cvxopt', 'closed_form']:
+            print('solver needs to be either gurobi, cvxopt, or closed_form')
+            sys.exit()
+        if self.qp.method == 'exact' and solver == 'cvxopt':
+            print('CVXOPT does currently not work with the method exact. Use gurobi or closed_form instead')
+            sys.exit()
+        if self.qp.lb == -np.infty and self.qp.ub == np.infty and solver != 'closed_form':
+            print('No lower and upper bounds set, change solver to closed_form')
+            solver = 'closed_form'
+        if (self.qp.lb != -np.infty or self.qp.ub != np.infty) and solver == 'closed_form':
+            print('WARNING: lower and upper bounds set but solver is closed_form. Solution might be out of range')          
+        if try_closed_form is True and (self.qp.lb != -np.infty or self.qp.ub != np.infty):
+            qp_solver = QPSolver('closed_form')
+            qp_solver.optimize(self.qp)
+            if min(qp_solver.solution) < self.qp.lb or max(qp_solver.solution) > self.qp.ub:
+                try_closed_form = False
+                if solver == 'closed_form':
+                    try_closed_form = True
+            else:
+                print('Optimal solution found with closed_form')
+        if try_closed_form is False:
+            if solver == 'gurobi' and self.qp.method == 'exact' and (self.qp.l_fit > 1 or self.qp.l_fit < 0):
+                print('Gurobi requires l_fit to lie between 0 and 1. Set l_fit to next bound')
+                self.qp.l_fit = min(max(self.qp.l_fit,0),1)   
+            qp_solver = QPSolver(solver)
+            qp_solver.optimize(self.qp)
         self.y = qp_solver.solution
+        self.y_obs_solution = self.y[self.qp.idx]
         if self.dimension == 2:
-            self.y_vec = self.y
+            self.y_vec = self.y  
             self.y = np.array(self.y.reshape((self.qp.n1, self.qp.n2)))
+            self.x1_mesh, self.x2_mesh = np.meshgrid(self.x1, self.x2)  
         self.qp.solver = solver
         return self.y
 
@@ -133,7 +199,7 @@ class QPComponents:
         self.H = tt(qp_input.hessian).dot(qp_input.hessian)/self.n
         self.f = np.zeros(self.n)
         if qp_input.dimension == 1:
-            idx = np.where(np.in1d(qp_input.x1, qp_input.x1_obs))[0]
+            self.idx = np.where(np.in1d(qp_input.x1, qp_input.x1_obs))[0]
         elif qp_input.dimension == 2:
             idx1 = []
             for x1_obs_i in qp_input.x1_obs:
@@ -141,15 +207,17 @@ class QPComponents:
                   idx2 = []
             for x2_obs_i in qp_input.x2_obs:
                  idx2.append(np.where(x2_obs_i == qp_input.x2)[0][0])
-            idx = self.n1 * np.array(idx1) + np.array(idx2)
+            self.idx = self.n1 * np.array(idx1) + np.array(idx2)
+            self.idx1 = idx1
+            self.idx2 = idx2
         if method == 'exact':
              self.H = self.H - l_fit*qp_input.hessian
              self.Aeq = np.array(sparse.csr_matrix((self.n_obs, self.n)).todense())
-             for iterate, i in enumerate(idx):
+             for iterate, i in enumerate(self.idx):
                   self.Aeq[iterate][i] = 1
              self.beq = qp_input.y_obs      
         elif method == 'smooth':
-             for iterate, i in enumerate(idx):
+             for iterate, i in enumerate(self.idx):
                   self.H[i][i] = self.H[i][i] + l_fit / self.n_obs
                   self.f[i] = -l_fit * qp_input.y_obs[iterate] / self.n_obs
         
@@ -194,28 +262,19 @@ class QPSolver:
 
     def cvx_qp(self,qp):
         A_cvx = cc((-sparse.identity(qp.n).toarray(), sparse.identity(qp.n).toarray()))
-        b_cvx = cc((-qp.lb, qp.ub))
+        b_cvx = cc((np.array(-qp.lb)*np.ones(qp.n), np.array(qp.ub)*np.ones(qp.n)))
         if qp.A is not None:
              A_cvx = matrix(cc((qp.A, A_cvx)))
              b_cvx = matrix(cc((qp.b,b_cvx)))
-        #if qp.Aeq is not None:
-        #     cvxopt_dict = cvxsolvers.qp(matrix(qp.H), matrix(qp.f), A_cvx, b_cvx, matrix(qp.Aeq), matrix(qp.beq))
-        #else:
-        #     cvxopt_dict = cvxsolvers.qp(matrix(qp.H), matrix(qp.f), A_cvx, b_cvx)
-        #A_cvx = cc((A_cvx, qp.Aeq))
-        #b_cvx = cc((b_cvx, qp.beq))
-        #A_cvx = cc((A_cvx, -qp.Aeq))
-        #b_cvx = cc((b_cvx, - qp.beq))
-        #cvxopt_dict = cvxsolvers.qp(matrix(qp.H), matrix(qp.f), matrix(A_cvx), matrix(b_cvx))
-        print(len(qp.H),len(qp.f))
-        cvxopt_dict = cvxsolvers.qp(matrix(qp.H), matrix(qp.f))
-        self.solution = np.array(cvxopt_dict['x'])
-
+        if qp.Aeq is not None:
+             cvxopt_dict = cvxsolvers.qp(matrix(qp.H), matrix(qp.f), matrix(A_cvx), matrix(b_cvx), matrix(qp.Aeq), matrix(qp.beq))
+        else:
+             cvxopt_dict = cvxsolvers.qp(matrix(qp.H), matrix(qp.f), matrix(A_cvx), matrix(b_cvx))
+        self.solution = np.array(list(cvxopt_dict['x'])) 
+       
     def gurobi_qp(self, qp):
         n = qp.H.shape[1]
         model = Model()
-        qp.lb = 0.00001
-        qp.ub = 1.00001
         x = {
             i: model.addVar(
                 vtype=GRB.CONTINUOUS,
