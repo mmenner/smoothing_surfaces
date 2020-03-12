@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='smoothingsurfaces',
-    url='https://github.com/mmenner',
+    url='https://github.com/mmenner/smurf',
     author='mmenner',
     author_email='marco.menner88@gmail.com',
     packages=['smurf'],
