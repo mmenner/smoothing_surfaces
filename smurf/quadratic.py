@@ -66,7 +66,7 @@ class QPSmoother:
         self.qp = None
         self.y = None       
         
-    def get_qp(self, qp_method, solver, l_fit=0, lb=-np.infty, ub=np.infty):
+    def get_qp(self, qp_method, l_fit=0, lb=-np.infty, ub=np.infty):
         
         if qp_method == 'smooth':
             if l_fit <= 0 or l_fit >=1:
