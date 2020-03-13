@@ -12,7 +12,7 @@ tt = np.matrix.transpose
 cc = np.concatenate
 
 class QPSmoother:
-    '''QPSmoother class. 
+    '''QPSmoother class. Uses QP to find a smooth surface
     init:
           x1:      full grid dimension1  
           x1_obs:  features dimension1 (must intersect with full grid x1)
